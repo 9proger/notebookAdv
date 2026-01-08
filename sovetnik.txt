@@ -1,0 +1,285 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, KFold, cross_val_score
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import IterativeImputer, KNNImputer
+from pyod.models.iforest import IForest
+from pyod.models.ocsvm import OCSVM
+from umap import UMAP
+from sklearn.cluster import DBSCAN
+import matplotlib.pyplot as plt
+from scipy import stats
+from scipy.special import kl_div
+from scipy.stats import entropy
+from matplotlib.axes._axes import Axes
+import typing as t
+import seaborn as sns
+from sklearn.metrics import mean_squared_error
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
+#from google.colab import files
+#uploaded = files.upload() #Добавление файла в проект google colab, используется лишь единожды для занесения файла, тк в дальнейшем будет лишь копирование одного файла
+
+
+df=pd.read_csv('/content/portal_data.csv', encoding='windows-1251', sep='|')
+
+df['Скорость перехода через портал'] = pd.to_numeric(df['Скорость перехода через портал'].replace('-', np.nan))
+
+df['Древний Ветер'].value_counts()
+
+order = ['Слабый', 'Ниже среднего', 'Выше среднего', 'Сильный'] #Индексируем признак в порядке возрастания мощи
+
+vectors = df['Тип Вектора Мощи'].value_counts().reindex(order)
+print(vectors)
+
+
+iterative_imputer = IterativeImputer(random_state=seed)
+X_train_filled_mrmse_iterative = pd.DataFrame(iterative_imputer.fit_transform(X_train_nrsme), columns=X_train_nrsme.columns)
+
+knn_imputer = KNNImputer(n_neighbors=5)
+X_train_filled_mrmse_KNN = pd.DataFrame(knn_imputer.fit_transform(X_train_nrsme), columns=X_train_nrsme.columns)
+
+X_train = pd.DataFrame(iterative_imputer.fit_transform(X_train), columns=X_train.columns) #Заполнение пропусков IterativeImputer в тренировачных данных
+X_test = pd.DataFrame(iterative_imputer.transform(X_test), columns=X_test.columns) # заполнение пропусков IterativeImputer в тестовых данных
+
+encoder = OneHotEncoder(sparse_output=False, dtype = 'int')
+encoded_array = encoder.fit_transform(X_train[['Тип Вектора Мощи']])
+
+feature_names = [f'Тип Вектора Мощи {int(cat)}' for cat in encoder.categories_[0]]
+
+
+X_train = X_train.drop('Тип Вектора Мощи', axis=1)
+X_train[feature_names] = encoded_array
+
+X_train.head()
+
+X_test_encoded = encoder.transform(X_test[['Тип Вектора Мощи']])
+
+
+X_2d = UMAP().fit_transform(X_train)
+
+isf = IForest().fit(X_train)
+isf_anomaly = isf.predict(X_train)
+
+
+draw_anomaly_pie(isf_anomaly)
+
+draw_anomaly(X_2d, isf_anomaly.astype(bool))
+
+ocsvm = OCSVM().fit(X_train)
+ocsvm_anomaly = ocsvm.predict(X_train)
+
+
+draw_anomaly_pie(ocsvm_anomaly)
+
+
+draw_anomaly(X_2d, ocsvm_anomaly.astype(bool))
+
+
+anomalies = np.all(np.array([
+    isf_anomaly,
+    ocsvm_anomaly,
+]), axis=0)
+
+anomaly_index = X_train.loc[anomalies].index
+
+
+draw_anomaly_pie(anomalies)
+
+
+
+common_idx = y_train.index.intersection(anomaly_index)
+
+X_train = X_train.drop(index=common_idx)
+y_train = y_train.drop(index=common_idx)
+
+
+df_heatmap = X_train
+df_heatmap_corr = df_heatmap.corr()
+sns.heatmap(df_heatmap_corr, annot=True)
+
+# 1. Стандартизация (StandardScaler)
+scaler_standard = StandardScaler()
+X_train_standard = scaler_standard.fit_transform(X_train)
+X_train_standard = pd.DataFrame(X_train_standard, columns=X_train.columns)
+
+X_test_standard = scaler_standard.transform(X_test)
+X_test_standard = pd.DataFrame(X_test_standard, columns=X_test.columns)
+
+# 2. MinMaxScaler
+scaler_minmax = MinMaxScaler()
+X_train_minmax = scaler_minmax.fit_transform(X_train)
+X_train_minmax = pd.DataFrame(X_train_minmax, columns=X_train.columns)
+
+X_test_minmax = scaler_minmax.transform(X_test)
+X_test_minmax = pd.DataFrame(X_test_minmax, columns=X_test.columns)
+
+
+# 3. RobustScaler
+scaler_robust = RobustScaler()
+X_train_robust = scaler_robust.fit_transform(X_train)
+X_train_robust = pd.DataFrame(X_train_robust, columns=X_train.columns)
+
+X_test_robust = scaler_robust.transform(X_test)
+X_test_robust = pd.DataFrame(X_test_robust, columns=X_test.columns)
+
+
+
+data = X_train.copy()
+data["Гармония Бессмертия"] = y_train
+
+corr_vector = data.corr()["Гармония Бессмертия"].drop("Гармония Бессмертия")
+
+
+corr_vector_df = corr_vector.to_frame(name="Гармония Бессмертия")
+
+sns.heatmap(corr_vector_df, annot=True)
+
+
+
+# импорт моделей из пула
+from sklearn.linear_model import LinearRegression, ElasticNet
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.ensemble import IsolationForest, RandomForestRegressor
+from sklearn.pipeline import Pipeline
+from sklearn import svm
+
+
+# подбор гиперпараметров и обучения лучших моделей
+import optuna
+def cross(model,X_train,y_train):
+  # Инициализация KFold
+  kf = KFold(n_splits=5, shuffle=True, random_state=42)
+  scores = cross_val_score(model, X_train, y_train, cv=kf, scoring='neg_mean_squared_error')
+  return scores
+
+def Optun(model, X_train, y_train, X_test, y_test, parameters):
+
+    def objective(trial):
+
+        params = {}
+
+        for param_name, param_info in parameters.items():
+
+            param_type = param_info[0]
+
+            if param_type == "float":
+                _, low, high, log = param_info
+                params[param_name] = trial.suggest_float(
+                    param_name, low, high, log=log
+                )
+
+            elif param_type == "int":
+                _, low, high = param_info
+                params[param_name] = trial.suggest_int(
+                    param_name, low, high
+                )
+
+            elif param_type == "categorical":
+                _, choices = param_info
+                params[param_name] = trial.suggest_categorical(
+                    param_name, choices
+                )
+
+            else:
+                raise ValueError(f"Unknown parameter type: {param_type}")
+
+        model_ = model.set_params(**params)
+
+        model_.fit(X_train, y_train)
+        y_pred = model_.predict(X_test)
+
+        mse = mean_squared_error(y_test, y_pred) #MSE является гладкой и дифференцируемой функцией, что делает её удобной для оптимизации
+        return mse
+
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=100)
+
+    return study.best_params
+
+model = ElasticNet()
+OptunaP = Optun(model,X_train,y_train,X_test,y_test,parameters_Elastic)
+OptunaScores = cross(model.set_params(**OptunaP),X_train,y_train)
+
+print(OptunaP,'ElasticNet')
+print(OptunaScores,'ElasticNet')
+
+model = svm.SVR()
+OptunaP = Optun(model,X_train,y_train,X_test,y_test,parameters_SVR)
+OptunaScores = cross(model.set_params(**OptunaP),X_train,y_train)
+
+print(OptunaP,'SVR')
+print(OptunaScores,'SVR')
+
+#model = IsolationForest()
+#OptunaP = Optun(model,X_train,y_train,X_test,y_test,parameters_Forest)
+#OptunaScores = cross(model.set_params(**OptunaP),X_train,y_train)
+
+#print(OptunaP,'IsolationForest')
+#print(OptunaScores,'IsolationForest')
+
+model = RandomForestRegressor()
+OptunaP = Optun(model, X_train, y_train, X_test, y_test, parameters_Forest)
+OptunaScores = cross(model.set_params(**OptunaP), X_train, y_train)
+
+print(OptunaP,'RandomForestRegressor')
+print(OptunaScores,'RandomForestRegressor')
+
+Input = [('standardscaler', StandardScaler()), ('polynomial', PolynomialFeatures(degree=2, include_bias=False)), ('model', LinearRegression()) ]
+pipe = Pipeline(Input)
+pipe.fit(X_train, y_train)
+Yhat_pipe = pipe.predict(X_test)
+
+
+
+sets = [('',X_train, X_test), ('standart',X_train_standard, X_test_standard),  ('minmax',X_train_minmax, X_test_minmax), ('robust',X_train_robust, X_test_robust)]
+     
+
+# ячейки для вычисления метрик на лучших моделях и их сопоставление
+from math import sqrt
+Headings1=["Регрессор","MAE","MSE","RMSE","MAPE","R^2","MAE","MSE","RMSE","MAPE","R^2"]
+
+table1=[]
+
+
+classifiers = {
+    'ElasticNet': ElasticNet(alpha = 0.06, l1_ratio = 0.0006),
+    'SVR': svm.SVR(C = 0.44, epsilon = 0.0015, gamma = 'scale'),
+    'RandomForestRegressor': RandomForestRegressor(n_estimators = 10, max_depth=3)
+}
+
+for index, (name, classifier) in enumerate(classifiers.items()):
+    for scale, X_train, X_test in sets:
+
+
+      classifier.fit(X_train, np.ravel(y_train))
+
+      y_pred = classifier.predict(X_train)
+      a=([round(mean_absolute_error(y_train, y_pred),4),round(mean_squared_error(y_train, y_pred),4),round(sqrt(mean_squared_error(y_train, y_pred)),4),round(sqrt(mean_absolute_percentage_error(y_train, y_pred)),4),round(r2_score(y_train, y_pred),2)])
+
+      y_pred = classifier.predict(X_test)
+      b=([round(mean_absolute_error(y_test, y_pred),4),round(mean_squared_error(y_test, y_pred),4),round(sqrt(mean_squared_error(y_test, y_pred)),4),round(sqrt(mean_absolute_percentage_error(y_test, y_pred)),4),round(r2_score(y_test, y_pred),2)])
+
+
+      y_test_np=np.array(y_test)
+
+
+
+      table1.append([name + ' ' +scale]+a+b)
+
+for scale, X_train, X_test in sets:
+
+  y_Polinom_pred = pipe.predict(X_train)
+  a=([round(mean_absolute_error(y_train, y_Polinom_pred),4),round(mean_squared_error(y_train, y_Polinom_pred),4),round(sqrt(mean_squared_error(y_train, y_Polinom_pred)),4),round(sqrt(mean_absolute_percentage_error(y_train, y_Polinom_pred)),4),round(r2_score(y_train, y_Polinom_pred),2)])
+  y_Polinom_pred = pipe.predict(X_test)
+  b=([round(mean_absolute_error(y_test, y_Polinom_pred),4),round(mean_squared_error(y_test, y_Polinom_pred),4),round(sqrt(mean_squared_error(y_test, y_Polinom_pred)),4),round(sqrt(mean_absolute_percentage_error(y_test, y_Polinom_pred)),4),round(r2_score(y_test, y_Polinom_pred),2)])
+
+
+  table1.append(["Polinomial Regression" +''+ scale]+a+b)
+
+
+table_Scikit_Custom=pd.DataFrame(table1, columns=Headings1)
+table_Scikit_Custom.head(20)
+
+
+
